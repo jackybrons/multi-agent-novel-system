@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from .llm import DeepSeekGateway
 from .prompts import (
@@ -18,6 +18,13 @@ class Gateway(Protocol):
     ) -> dict[str, Any]: ...
 
 
+@dataclass(frozen=True)
+class WorkflowEvent:
+    phase: str
+    message: str
+    manuscript: str
+
+
 @dataclass
 class StoryState:
     idea: str = ""
@@ -30,12 +37,17 @@ class StoryState:
     facts: list[str] = field(default_factory=list)
     open_threads: list[str] = field(default_factory=list)
     chapters: list[str] = field(default_factory=list)
+    preview_text: str = ""
     review: str = ""
+    status: str = "等待操作"
     collaboration: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def manuscript(self) -> str:
-        return "\n\n".join(self.chapters)
+        sections = [*self.chapters]
+        if self.preview_text:
+            sections.append(self.preview_text)
+        return "\n\n".join(sections)
 
 
 class Agent:
@@ -57,6 +69,14 @@ class Agent:
         if missing:
             raise ValueError(f"{self.name} 缺少字段：{', '.join(missing)}")
         return result
+
+    def stream(self, payload: dict[str, Any]) -> Iterator[str]:
+        stream_method = getattr(self.gateway, "stream_text", None)
+        if stream_method is None:
+            result = self.run(payload)
+            yield str(result["text"])
+            return
+        yield from stream_method(self.name, self.prompt, payload)
 
 
 class NovelWorkflow:
@@ -100,6 +120,7 @@ class NovelWorkflow:
     def create_outline(self, idea: str, requirements: str = "") -> StoryState:
         if not idea.strip():
             raise ValueError("请先输入小说创意。")
+        self.state.status = "故事策划 Agent 正在建立故事蓝图…"
         result = self.planner.run({"idea": idea, "requirements": requirements})
         self.state = StoryState(
             idea=idea.strip(),
@@ -108,6 +129,7 @@ class NovelWorkflow:
             outline=str(result["outline"]),
             plan=str(result["next_mission"]),
             handoff=[str(item) for item in result["handoff"]],
+            status="故事蓝图已生成，可以开始创作开篇",
         )
         self._record(
             "故事策划 Agent",
@@ -117,12 +139,22 @@ class NovelWorkflow:
         return self.state
 
     def create_opening(self, style: str = "") -> StoryState:
-        return self._write_round("开篇", style)
+        for _ in self.stream_opening(style):
+            pass
+        return self.state
 
     def continue_story(self, style: str = "") -> StoryState:
-        return self._write_round("续写", style)
+        for _ in self.stream_continue(style):
+            pass
+        return self.state
 
-    def _write_round(self, mode: str, style: str) -> StoryState:
+    def stream_opening(self, style: str = "") -> Iterator[WorkflowEvent]:
+        yield from self._stream_round("开篇", style)
+
+    def stream_continue(self, style: str = "") -> Iterator[WorkflowEvent]:
+        yield from self._stream_round("续写", style)
+
+    def _stream_round(self, mode: str, style: str) -> Iterator[WorkflowEvent]:
         if not self.state.outline:
             raise ValueError("请先生成大纲。")
 
@@ -141,9 +173,13 @@ class NovelWorkflow:
             "open_threads": self.state.open_threads,
             "recent_text": recent_text,
         }
+
+        yield self._event("draft_start", "正文写作 Agent 正在构思场景…")
         draft = self.drafter.run(shared_context)
         self._record("正文写作 Agent", f"创作意图：{draft['intent']}\n已提交第一版草稿。")
+        yield self._event("draft_done", "草稿完成，正在交给独立审稿 Agent…")
 
+        yield self._event("critic_start", "独立审稿 Agent 正在检查逻辑与连续性…")
         critic_review = self.critic.run(
             {
                 **shared_context,
@@ -156,7 +192,9 @@ class NovelWorkflow:
             "独立审稿 Agent",
             self._format_exchange(critic_review["questions"], critic_review["conflicts"]),
         )
+        yield self._event("critic_done", "审稿完成，正在等待写作 Agent 回应…")
 
+        yield self._event("writer_response_start", "写作回应 Agent 正在逐项处理编辑质询…")
         writer_response = self.writer_response.run(
             {
                 **shared_context,
@@ -170,24 +208,32 @@ class NovelWorkflow:
                 writer_response["answers"], writer_response["accepted_changes"]
             ),
         )
+        yield self._event("writer_response_done", "写作回应完成，开始流式生成最终正文…")
 
-        revised = self.reviser.run(
-            {
-                **shared_context,
-                "original_draft": draft["draft"],
-                "critic_review": critic_review,
-                "writer_response": writer_response,
-                "next_plan": draft["next_plan"],
-            }
-        )
-        final_text = str(revised["text"]).strip()
+        revision_payload = {
+            **shared_context,
+            "original_draft": draft["draft"],
+            "critic_review": critic_review,
+            "writer_response": writer_response,
+            "next_plan": draft["next_plan"],
+        }
+        self.state.preview_text = ""
+        yield self._event("revision_start", "修订 Agent 正在输出最终正文…")
+        for delta in self.reviser.stream(revision_payload):
+            self.state.preview_text += delta
+            yield self._event("revision_delta", "修订 Agent 正在流式输出正文…")
+
+        final_text = self.state.preview_text.strip()
         if not final_text:
             raise ValueError("修订 Agent 返回了空正文。")
+        self.state.preview_text = ""
         self.state.chapters.append(final_text)
         self.state.plan = str(draft["next_plan"])
         self.state.handoff = [self.state.plan]
         self._record("修订 Agent", "已综合审稿意见与写作回应，完成最终正文。")
+        yield self._event("revision_done", "正文完成，正在更新长期记忆…")
 
+        yield self._event("memory_start", "故事记忆 Agent 正在回写事实与未决线索…")
         memory = self.memory.run(
             {
                 "story_bible": self.state.story_bible,
@@ -202,7 +248,11 @@ class NovelWorkflow:
         self.state.facts = [str(item) for item in memory["facts"]]
         self.state.open_threads = [str(item) for item in memory["open_threads"]]
         self._record("故事记忆 Agent", "已将最终正文回写为共享记忆、事实和未决线索。")
-        return self.state
+        yield self._event("memory_done", "本轮创作完成")
+
+    def _event(self, phase: str, message: str) -> WorkflowEvent:
+        self.state.status = message
+        return WorkflowEvent(phase, message, self.state.manuscript)
 
     def _record(self, agent: str, message: str) -> None:
         self.state.collaboration.append({"agent": agent, "message": message})

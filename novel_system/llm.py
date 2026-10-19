@@ -39,3 +39,31 @@ class DeepSeekGateway:
             return json.loads(content)
         except json.JSONDecodeError as exc:
             raise ValueError(f"{agent_name} 未返回有效 JSON：{content}") from exc
+
+    def stream_text(
+        self,
+        agent_name: str,
+        system_prompt: str,
+        payload: dict[str, Any],
+    ):
+        """逐 token 返回最终正文，供 Gradio 实时刷新。"""
+        if not self.api_key:
+            raise RuntimeError("请先设置环境变量 DEEPSEEK_API_KEY。")
+
+        client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
+            ],
+            temperature=0.75,
+            stream=True,
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
