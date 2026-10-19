@@ -33,6 +33,7 @@ class DeepSeekGateway:
             ],
             response_format={"type": "json_object"},
             temperature=0.75,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         content = response.choices[0].message.content or "{}"
         try:
@@ -62,6 +63,37 @@ class DeepSeekGateway:
             ],
             temperature=0.75,
             stream=True,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
+
+    def stream_json(
+        self,
+        agent_name: str,
+        system_prompt: str,
+        payload: dict[str, Any],
+    ):
+        """流式返回 JSON 文本，让工作流提前展示其中的正文草稿。"""
+        if not self.api_key:
+            raise RuntimeError("请先设置环境变量 DEEPSEEK_API_KEY。")
+
+        client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.75,
+            stream=True,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         for chunk in response:
             delta = chunk.choices[0].delta.content or ""

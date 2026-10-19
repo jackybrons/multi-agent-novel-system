@@ -1,3 +1,5 @@
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol
 
@@ -65,10 +67,20 @@ class Agent:
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self.gateway.generate(self.name, self.prompt, payload)
+        return self.validate(result)
+
+    def validate(self, result: dict[str, Any]) -> dict[str, Any]:
         missing = [key for key in self.required_keys if key not in result]
         if missing:
             raise ValueError(f"{self.name} 缺少字段：{', '.join(missing)}")
         return result
+
+    def stream_json(self, payload: dict[str, Any]) -> Iterator[str]:
+        stream_method = getattr(self.gateway, "stream_json", None)
+        if stream_method is None:
+            yield json.dumps(self.run(payload), ensure_ascii=False)
+            return
+        yield from stream_method(self.name, self.prompt, payload)
 
     def stream(self, payload: dict[str, Any]) -> Iterator[str]:
         stream_method = getattr(self.gateway, "stream_text", None)
@@ -174,8 +186,21 @@ class NovelWorkflow:
             "recent_text": recent_text,
         }
 
-        yield self._event("draft_start", "正文写作 Agent 正在构思场景…")
-        draft = self.drafter.run(shared_context)
+        yield self._event("draft_start", "正文写作 Agent 正在流式生成初稿…")
+        draft_buffer = ""
+        displayed_draft = ""
+        for delta in self.drafter.stream_json(shared_context):
+            draft_buffer += delta
+            partial_draft = self._extract_partial_json_string(draft_buffer, "draft")
+            if partial_draft != displayed_draft:
+                displayed_draft = partial_draft
+                self.state.preview_text = displayed_draft
+                yield self._event("draft_delta", "正文写作 Agent 正在流式生成初稿…")
+        try:
+            draft = self.drafter.validate(json.loads(draft_buffer))
+        except json.JSONDecodeError as exc:
+            raise ValueError("正文写作 Agent 的流式 JSON 不完整。") from exc
+        self.state.preview_text = str(draft["draft"])
         self._record("正文写作 Agent", f"创作意图：{draft['intent']}\n已提交第一版草稿。")
         yield self._event("draft_done", "草稿完成，正在交给独立审稿 Agent…")
 
@@ -256,6 +281,37 @@ class NovelWorkflow:
 
     def _record(self, agent: str, message: str) -> None:
         self.state.collaboration.append({"agent": agent, "message": message})
+
+    @staticmethod
+    def _extract_partial_json_string(buffer: str, key: str) -> str:
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"', buffer)
+        if not match:
+            return ""
+        raw = buffer[match.end() :]
+        output = []
+        index = 0
+        escapes = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\", "/": "/"}
+        while index < len(raw):
+            char = raw[index]
+            if char == '"':
+                break
+            if char != "\\":
+                output.append(char)
+                index += 1
+                continue
+            if index + 1 >= len(raw):
+                break
+            escaped = raw[index + 1]
+            if escaped == "u":
+                code = raw[index + 2 : index + 6]
+                if len(code) < 4 or not all(item in "0123456789abcdefABCDEF" for item in code):
+                    break
+                output.append(chr(int(code, 16)))
+                index += 6
+                continue
+            output.append(escapes.get(escaped, escaped))
+            index += 2
+        return "".join(output)
 
     @staticmethod
     def _format_exchange(primary: list[Any], secondary: list[Any]) -> str:
