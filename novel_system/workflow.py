@@ -8,6 +8,7 @@ from .prompts import (
     MEMORY_PROMPT,
     PLANNER_PROMPT,
     REVISER_PROMPT,
+    WRITER_RESPONSE_PROMPT,
 )
 
 
@@ -21,13 +22,16 @@ class Gateway(Protocol):
 class StoryState:
     idea: str = ""
     requirements: str = ""
+    story_bible: str = ""
     outline: str = ""
     plan: str = ""
+    handoff: list[str] = field(default_factory=list)
     memory: str = ""
     facts: list[str] = field(default_factory=list)
+    open_threads: list[str] = field(default_factory=list)
     chapters: list[str] = field(default_factory=list)
     review: str = ""
-    trace: list[str] = field(default_factory=list)
+    collaboration: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def manuscript(self) -> str:
@@ -56,25 +60,42 @@ class Agent:
 
 
 class NovelWorkflow:
-    """以共享故事状态串联五个职责独立的 Agent。"""
+    """通过任务交接、编辑质询和写作回应组织多 Agent 协作。"""
 
     def __init__(self, gateway: Gateway | None = None):
         gateway = gateway or DeepSeekGateway()
         self.state = StoryState()
         self.planner = Agent(
-            "故事策划 Agent", PLANNER_PROMPT, ("outline", "initial_plan"), gateway
+            "故事策划 Agent",
+            PLANNER_PROMPT,
+            ("story_bible", "outline", "next_mission", "handoff"),
+            gateway,
         )
         self.drafter = Agent(
-            "正文写作 Agent", DRAFTER_PROMPT, ("draft", "next_plan", "new_facts"), gateway
+            "正文写作 Agent",
+            DRAFTER_PROMPT,
+            ("intent", "draft", "next_plan", "new_facts"),
+            gateway,
         )
         self.critic = Agent(
             "独立审稿 Agent",
             CRITIC_PROMPT,
-            ("issues", "strengths", "revision_instructions"),
+            ("questions", "conflicts", "strengths", "revision_goals"),
+            gateway,
+        )
+        self.writer_response = Agent(
+            "写作回应 Agent",
+            WRITER_RESPONSE_PROMPT,
+            ("answers", "accepted_changes", "rejected_changes", "revised_draft"),
             gateway,
         )
         self.reviser = Agent("修订 Agent", REVISER_PROMPT, ("text",), gateway)
-        self.memory = Agent("故事记忆 Agent", MEMORY_PROMPT, ("memory", "facts"), gateway)
+        self.memory = Agent(
+            "故事记忆 Agent",
+            MEMORY_PROMPT,
+            ("memory", "facts", "open_threads"),
+            gateway,
+        )
 
     def create_outline(self, idea: str, requirements: str = "") -> StoryState:
         if not idea.strip():
@@ -83,59 +104,80 @@ class NovelWorkflow:
         self.state = StoryState(
             idea=idea.strip(),
             requirements=requirements.strip(),
+            story_bible=str(result["story_bible"]),
             outline=str(result["outline"]),
-            plan=str(result["initial_plan"]),
-            trace=["故事策划 Agent：已生成大纲与开篇计划"],
+            plan=str(result["next_mission"]),
+            handoff=[str(item) for item in result["handoff"]],
+        )
+        self._record(
+            "故事策划 Agent",
+            f"已建立故事圣经。下一幕任务：{self.state.plan}\n"
+            f"交接事项：{'；'.join(self.state.handoff)}",
         )
         return self.state
 
     def create_opening(self, style: str = "") -> StoryState:
-        return self._write_round("opening", style)
+        return self._write_round("开篇", style)
 
     def continue_story(self, style: str = "") -> StoryState:
-        return self._write_round("continuation", style)
+        return self._write_round("续写", style)
 
     def _write_round(self, mode: str, style: str) -> StoryState:
         if not self.state.outline:
             raise ValueError("请先生成大纲。")
 
         recent_text = "\n\n".join(self.state.chapters[-2:])
-        draft = self.drafter.run(
-            {
-                "mode": mode,
-                "idea": self.state.idea,
-                "requirements": self.state.requirements,
-                "style": style,
-                "outline": self.state.outline,
-                "plan": self.state.plan,
-                "memory": self.state.memory,
-                "facts": self.state.facts,
-                "recent_text": recent_text,
-            }
-        )
-        self.state.trace.append("正文写作 Agent：已完成场景草稿")
+        shared_context = {
+            "mode": mode,
+            "idea": self.state.idea,
+            "requirements": self.state.requirements,
+            "style": style,
+            "story_bible": self.state.story_bible,
+            "outline": self.state.outline,
+            "mission": self.state.plan,
+            "handoff": self.state.handoff,
+            "memory": self.state.memory,
+            "facts": self.state.facts,
+            "open_threads": self.state.open_threads,
+            "recent_text": recent_text,
+        }
+        draft = self.drafter.run(shared_context)
+        self._record("正文写作 Agent", f"创作意图：{draft['intent']}\n已提交第一版草稿。")
 
-        review = self.critic.run(
+        critic_review = self.critic.run(
             {
-                "outline": self.state.outline,
-                "plan": self.state.plan,
-                "memory": self.state.memory,
-                "facts": self.state.facts,
-                "recent_text": recent_text,
+                **shared_context,
+                "writer_intent": draft["intent"],
                 "draft": draft["draft"],
             }
         )
-        self.state.review = self._format_review(review)
-        self.state.trace.append("独立审稿 Agent：已检查一致性与叙事质量")
+        self.state.review = self._format_review(critic_review)
+        self._record(
+            "独立审稿 Agent",
+            self._format_exchange(critic_review["questions"], critic_review["conflicts"]),
+        )
+
+        writer_response = self.writer_response.run(
+            {
+                **shared_context,
+                "draft": draft["draft"],
+                "critic_review": critic_review,
+            }
+        )
+        self._record(
+            "写作回应 Agent",
+            self._format_exchange(
+                writer_response["answers"], writer_response["accepted_changes"]
+            ),
+        )
 
         revised = self.reviser.run(
             {
-                "outline": self.state.outline,
-                "memory": self.state.memory,
-                "facts": self.state.facts,
-                "draft": draft["draft"],
-                "review": review,
-                "style": style,
+                **shared_context,
+                "original_draft": draft["draft"],
+                "critic_review": critic_review,
+                "writer_response": writer_response,
+                "next_plan": draft["next_plan"],
             }
         )
         final_text = str(revised["text"]).strip()
@@ -143,28 +185,41 @@ class NovelWorkflow:
             raise ValueError("修订 Agent 返回了空正文。")
         self.state.chapters.append(final_text)
         self.state.plan = str(draft["next_plan"])
-        self.state.trace.append("修订 Agent：已根据审稿意见交付正文")
+        self.state.handoff = [self.state.plan]
+        self._record("修订 Agent", "已综合审稿意见与写作回应，完成最终正文。")
 
         memory = self.memory.run(
             {
+                "story_bible": self.state.story_bible,
                 "previous_memory": self.state.memory,
                 "previous_facts": self.state.facts,
-                "new_facts": draft["new_facts"],
-                "latest_text": final_text,
+                "previous_open_threads": self.state.open_threads,
+                "candidate_new_facts": draft["new_facts"],
+                "final_text": final_text,
             }
         )
         self.state.memory = str(memory["memory"])
         self.state.facts = [str(item) for item in memory["facts"]]
-        self.state.trace.append("故事记忆 Agent：已更新长期记忆与事实清单")
+        self.state.open_threads = [str(item) for item in memory["open_threads"]]
+        self._record("故事记忆 Agent", "已将最终正文回写为共享记忆、事实和未决线索。")
         return self.state
+
+    def _record(self, agent: str, message: str) -> None:
+        self.state.collaboration.append({"agent": agent, "message": message})
+
+    @staticmethod
+    def _format_exchange(primary: list[Any], secondary: list[Any]) -> str:
+        items = [str(item) for item in [*primary, *secondary]]
+        return "\n".join(f"- {item}" for item in items) or "- 本轮无新增问题"
 
     @staticmethod
     def _format_review(review: dict[str, Any]) -> str:
         sections = []
         for title, key in (
-            ("必须修复", "issues"),
+            ("编辑质询", "questions"),
+            ("必须修复", "conflicts"),
             ("应当保留", "strengths"),
-            ("修订指令", "revision_instructions"),
+            ("修订目标", "revision_goals"),
         ):
             items = review.get(key) or []
             content = "\n".join(f"- {item}" for item in items) or "- 无"

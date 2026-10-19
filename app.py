@@ -4,9 +4,34 @@ from novel_system import NovelWorkflow
 
 
 CSS = """
-.gradio-container {max-width: 1500px !important; margin: auto;}
-.hero {text-align: center; margin: 12px 0 24px;}
-.panel {border-radius: 14px;}
+html, body {height: 100%; overflow: hidden;}
+.gradio-container {
+    height: 100vh !important;
+    max-width: none !important;
+    overflow: hidden;
+    padding: 12px 18px !important;
+    background: linear-gradient(135deg, #f7f4ee 0%, #edf2f6 100%);
+}
+.hero {height: 72px; overflow: hidden; text-align: center; margin: 0 0 8px;}
+.hero h1 {margin: 0; font-size: 26px;}
+.hero p {margin: 4px 0 0; color: #5d6873;}
+.workspace {height: calc(100vh - 104px); overflow: hidden; gap: 14px;}
+.left-panel, .right-panel {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px;
+    border: 1px solid rgba(84, 96, 110, .16);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, .82);
+    box-shadow: 0 8px 30px rgba(40, 50, 60, .08);
+}
+.action-row {position: sticky; bottom: 0; background: white; padding-top: 8px; z-index: 2;}
+@media (max-width: 900px) {
+    html, body, .gradio-container {height: auto !important; overflow: auto;}
+    .workspace {height: auto; overflow: visible;}
+    .left-panel, .right-panel {height: auto; max-height: none;}
+}
 """
 
 
@@ -14,19 +39,32 @@ def _workflow(value):
     return value if isinstance(value, NovelWorkflow) else NovelWorkflow()
 
 
+def _list_markdown(items, empty_text):
+    return "\n".join(f"- {item}" for item in items) or empty_text
+
+
+def _collaboration_markdown(messages):
+    if not messages:
+        return "尚未调用 Agent。"
+    return "\n\n".join(
+        f"### {index + 1}. {item['agent']}\n{item['message']}"
+        for index, item in enumerate(messages)
+    )
+
+
 def _view(workflow):
     state = workflow.state
-    facts = "\n".join(f"- {item}" for item in state.facts)
-    trace = "\n".join(f"{index + 1}. {item}" for index, item in enumerate(state.trace))
     return (
         workflow,
+        state.story_bible,
         state.outline,
         state.plan,
         state.memory,
-        facts,
-        state.review,
+        _list_markdown(state.facts, "尚无事实记录。"),
+        _list_markdown(state.open_threads, "尚无未决线索。"),
+        state.review or "尚未生成正文。",
         state.manuscript,
-        trace,
+        _collaboration_markdown(state.collaboration),
     )
 
 
@@ -53,47 +91,63 @@ def build_app():
         workflow = gr.State(None)
         gr.Markdown(
             "# 多 Agent 小说创作系统\n"
-            "策划、写作、审稿、修订和记忆五个 Agent 共享故事状态，协作完成长篇创作。",
+            "策划交接 · 场景写作 · 编辑质询 · 写作回应 · 修订裁决 · 记忆回写",
             elem_classes="hero",
         )
 
-        with gr.Row():
-            with gr.Column(scale=4, elem_classes="panel"):
-                idea = gr.Textbox(
-                    label="小说创意",
-                    placeholder="例如：失去记忆的修表师发现，每修好一块旧表就会恢复陌生人的一天。",
-                    lines=4,
-                )
-                requirements = gr.Textbox(
-                    label="创作约束",
-                    placeholder="题材、主角限制、篇幅倾向等",
-                    lines=3,
-                )
-                style = gr.Textbox(
-                    label="文风要求",
-                    placeholder="例如：克制、悬疑、少用形容词",
-                    lines=2,
-                )
-                outline_button = gr.Button("生成故事大纲", variant="primary")
-                opening_button = gr.Button("创作开篇")
-                next_button = gr.Button("继续下一幕")
+        with gr.Row(equal_height=True, elem_classes="workspace"):
+            with gr.Column(scale=4, elem_classes="left-panel"):
+                with gr.Tabs():
+                    with gr.Tab("创作控制台"):
+                        idea = gr.Textbox(
+                            label="小说创意",
+                            placeholder="主角是谁？他想要什么？什么阻止了他？",
+                            lines=4,
+                        )
+                        requirements = gr.Textbox(
+                            label="创作约束",
+                            placeholder="题材、受众、人物限制、需要避开的内容",
+                            lines=3,
+                        )
+                        style = gr.Textbox(
+                            label="文风要求",
+                            placeholder="例如：第三人称限知，节奏紧凑，对话克制",
+                            lines=3,
+                        )
+                        with gr.Row(elem_classes="action-row"):
+                            outline_button = gr.Button("① 生成大纲", variant="primary")
+                            opening_button = gr.Button("② 创作开篇")
+                            next_button = gr.Button("③ 继续下一幕")
+                    with gr.Tab("故事圣经"):
+                        story_bible = gr.Textbox(label="长期设定", lines=18, interactive=False)
+                    with gr.Tab("剧情蓝图"):
+                        outline = gr.Textbox(label="阶段大纲", lines=15, interactive=False)
+                        plan = gr.Textbox(label="当前任务", lines=4, interactive=False)
+                    with gr.Tab("记忆与线索"):
+                        memory = gr.Textbox(label="长期记忆", lines=9, interactive=False)
+                        facts = gr.Markdown("尚无事实记录。")
+                        threads = gr.Markdown("尚无未决线索。")
 
-            with gr.Column(scale=6, elem_classes="panel"):
-                manuscript = gr.Textbox(label="小说正文", lines=24, interactive=False)
+            with gr.Column(scale=6, elem_classes="right-panel"):
+                manuscript = gr.Textbox(label="小说正文", lines=20, interactive=False)
+                with gr.Tabs():
+                    with gr.Tab("Agent 对话"):
+                        collaboration = gr.Markdown("尚未调用 Agent。")
+                    with gr.Tab("本轮审稿"):
+                        review = gr.Markdown("尚未生成正文。")
 
-        with gr.Tabs():
-            with gr.Tab("故事蓝图"):
-                outline = gr.Textbox(label="大纲", lines=14, interactive=False)
-                plan = gr.Textbox(label="下一步计划", lines=4, interactive=False)
-            with gr.Tab("审稿意见"):
-                review = gr.Markdown("尚未生成正文。")
-            with gr.Tab("长期记忆"):
-                memory = gr.Textbox(label="故事记忆", lines=8, interactive=False)
-                facts = gr.Markdown("尚无事实记录。")
-            with gr.Tab("协作轨迹"):
-                trace = gr.Markdown("尚未调用 Agent。")
-
-        outputs = [workflow, outline, plan, memory, facts, review, manuscript, trace]
+        outputs = [
+            workflow,
+            story_bible,
+            outline,
+            plan,
+            memory,
+            facts,
+            threads,
+            review,
+            manuscript,
+            collaboration,
+        ]
         outline_button.click(
             generate_outline,
             inputs=[workflow, idea, requirements],
@@ -101,7 +155,6 @@ def build_app():
         )
         opening_button.click(generate_opening, inputs=[workflow, style], outputs=outputs)
         next_button.click(generate_next, inputs=[workflow, style], outputs=outputs)
-
     return demo
 
 
