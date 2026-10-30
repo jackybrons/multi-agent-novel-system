@@ -34,8 +34,8 @@ html, body {height: 100%; overflow: hidden;}
     border-left: 4px solid #3978b8;
 }
 .manuscript {
-    height: calc(100vh - 355px);
-    min-height: 300px;
+    height: calc(100vh - 300px);
+    min-height: 180px;
     overflow-y: auto !important;
     padding: 18px 22px;
     border-radius: 12px;
@@ -43,6 +43,9 @@ html, body {height: 100%; overflow: hidden;}
     line-height: 1.85;
     white-space: pre-wrap;
 }
+.right-panel {overflow: hidden;}
+.output-tabs {min-height: 0; overflow: hidden;}
+.review-reader {height: calc(100vh - 300px); min-height: 180px; overflow-y: auto !important;}
 .action-row {position: sticky; bottom: 0; background: white; padding-top: 8px; z-index: 2;}
 @media (max-width: 900px) {
     html, body, .gradio-container {height: auto !important; overflow: auto;}
@@ -60,13 +63,11 @@ def _list_markdown(items, empty_text):
     return "\n".join(f"- {item}" for item in items) or empty_text
 
 
-def _collaboration_markdown(messages):
-    if not messages:
-        return "尚未调用 Agent。"
-    return "\n\n".join(
-        f"### {index + 1}. {item['agent']}\n{item['message']}"
-        for index, item in enumerate(messages)
-    )
+def _collaboration_messages(messages):
+    return [{
+        "role": "user" if item["agent"] in ("独立审稿 Agent", "协调器") else "assistant",
+        "content": f"**{item['agent']} → {item.get('recipient', '协作团队')}** · {item.get('kind', 'message')}\n\n{item['message'] or '正在组织消息…'}",
+    } for item in messages]
 
 
 def _view(workflow):
@@ -82,16 +83,14 @@ def _view(workflow):
         _list_markdown(state.open_threads, "尚无未决线索。"),
         state.review or "尚未生成正文。",
         state.manuscript,
-        _collaboration_markdown(state.collaboration),
+        _collaboration_messages(state.collaboration),
     )
 
 
 def generate_outline(workflow, idea, requirements):
     workflow = _workflow(workflow)
-    workflow.state.status = "故事策划 Agent 正在建立故事蓝图…"
-    yield _view(workflow)
-    workflow.create_outline(idea, requirements)
-    yield _view(workflow)
+    for _ in workflow.stream_outline(idea, requirements):
+        yield _view(workflow)
 
 
 def generate_opening(workflow, style):
@@ -111,7 +110,7 @@ def build_app():
         workflow = gr.State(None)
         gr.Markdown(
             "# 多 Agent 小说创作系统\n"
-            "策划交接 · 场景写作 · 编辑质询 · 写作回应 · 修订裁决 · 记忆回写",
+            "自主查阅历史 · 编辑与作者多轮协作 · 实时对话 · 故事记忆",
             elem_classes="hero",
         )
 
@@ -150,13 +149,13 @@ def build_app():
 
             with gr.Column(scale=6, elem_classes="right-panel"):
                 status = gr.Markdown("**当前状态：** 等待操作", elem_classes="status-bar")
-                gr.Markdown("### 小说正文")
-                manuscript = gr.Markdown("正文将在这里流式显示。", elem_classes="manuscript")
-                with gr.Tabs():
+                with gr.Tabs(elem_classes="output-tabs"):
+                    with gr.Tab("小说正文"):
+                        manuscript = gr.Markdown("正文将在这里流式显示。", elem_classes="manuscript")
                     with gr.Tab("Agent 对话"):
-                        collaboration = gr.Markdown("尚未调用 Agent。")
+                        collaboration = gr.Chatbot(label="Agent 协作现场", height="calc(100vh - 300px)")
                     with gr.Tab("本轮审稿"):
-                        review = gr.Markdown("尚未生成正文。")
+                        review = gr.Markdown("尚未生成正文。", elem_classes="review-reader")
 
         outputs = [
             workflow,
@@ -175,9 +174,10 @@ def build_app():
             generate_outline,
             inputs=[workflow, idea, requirements],
             outputs=outputs,
+            concurrency_id="story_workflow",
         )
-        opening_button.click(generate_opening, inputs=[workflow, style], outputs=outputs)
-        next_button.click(generate_next, inputs=[workflow, style], outputs=outputs)
+        opening_button.click(generate_opening, inputs=[workflow, style], outputs=outputs, concurrency_id="story_workflow")
+        next_button.click(generate_next, inputs=[workflow, style], outputs=outputs, concurrency_id="story_workflow")
     return demo
 
 

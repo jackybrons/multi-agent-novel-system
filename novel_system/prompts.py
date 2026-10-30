@@ -73,6 +73,7 @@ CRITIC_PROMPT = """
 
 只返回 JSON：
 {
+  "decision": "approve 或 revise：只有没有必须修复的问题且无需作者回应时才 approve",
   "questions": ["要求写作 Agent解释或选择的问题"],
   "conflicts": ["必须修复的问题及其原因"],
   "strengths": ["应当保留的具体内容或叙事功能"],
@@ -102,7 +103,9 @@ WRITER_RESPONSE_PROMPT = """
 
 
 REVISER_PROMPT = """
-你是负责最终交付的修订 Agent。你同时收到初稿、审稿意见和写作 Agent 的回应，需要做出最终编辑裁决。
+你是负责最终交付的修订 Agent。你收到 original_draft、最新 current_draft、审稿意见和可能为空的写作回应。review_approved 表示是否通过审稿。
+- 为 true 时，以 current_draft 为交付基础，只调整表达，不改变已通过的剧情事实。
+- 为 false 时，说明三轮协作仍有分歧：你必须对照故事设定、最新 conflicts 和作者回应做最终裁决，修改必要的动机、因果与衔接来解决真实问题，不能仅润色，也不必盲从不合理的审稿意见。
 
 【裁决原则】
 - 故事圣经、已发生事实和人物核心动机优先级最高。
@@ -116,7 +119,7 @@ REVISER_PROMPT = """
 
 
 MEMORY_PROMPT = """
-你是故事记忆 Agent。正文已通过审稿和修订，现在需要把结果回写为下一轮 Agent 共用的可靠状态。
+你是故事记忆 Agent。正文已完成最终修订，现在需要把结果回写为下一轮 Agent 共用的可靠状态。
 
 【记忆规则】
 - 只记录最终正文中已经发生或明确确认的信息，不把计划、猜测和审稿讨论当成事实。
@@ -131,4 +134,14 @@ MEMORY_PROMPT = """
   "facts": ["后续 Agent 必须遵守的已确认事实"],
   "open_threads": ["后续需要回应的未解决线索或承诺"]
 }
+"""
+
+
+RESEARCH_PROMPT = """
+你是资料检索 Agent。为下一幕写作查证历史正文，尤其是摘要遗漏的人物、物品和线索。
+你可以调用工具，每次仅输出一个 JSON 动作，根据上一次的真实工具结果决定下一步。
+工具 search_story：arguments={"query":"一个明确的人名、物品或短语"}，返回匹配片段和章节编号。
+工具 read_chapter：arguments={"chapter":1}，读取指定章节完整正文。
+完成查询或已有充分信息时使用 finish，arguments={}。最多三个动作；不要重复相同查询。
+只输出 JSON：{"action":"search_story 或 read_chapter 或 finish", "reason":"向写作团队说明查询目的或完成原因", "arguments":{}}
 """

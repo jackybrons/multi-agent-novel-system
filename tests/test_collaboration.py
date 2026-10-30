@@ -23,6 +23,7 @@ class CollaborationGateway:
                 "intent": "让主角为错误选择付出代价",
             },
             "独立审稿 Agent": {
+                "decision": "revise",
                 "questions": ["主角为何冒险？"],
                 "conflicts": ["动机没有落到行动"],
                 "strengths": ["失败结果明确"],
@@ -41,6 +42,8 @@ class CollaborationGateway:
                 "open_threads": ["怀表去向"],
             },
         }
+        if agent_name == "独立审稿 Agent" and payload.get("exchanges"):
+            responses[agent_name].update(decision="approve", conflicts=[], questions=[])
         return responses[agent_name]
 
 
@@ -58,11 +61,12 @@ class CollaborationTest(unittest.TestCase):
                 "正文写作 Agent",
                 "独立审稿 Agent",
                 "写作回应 Agent",
+                "独立审稿 Agent",
                 "修订 Agent",
                 "故事记忆 Agent",
             ],
         )
-        reviser_payload = gateway.calls[4][1]
+        reviser_payload = gateway.calls[5][1]
         self.assertIn("writer_response", reviser_payload)
         self.assertIn("critic_review", reviser_payload)
         self.assertGreaterEqual(len(workflow.state.collaboration), 5)

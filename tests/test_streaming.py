@@ -20,8 +20,11 @@ class StreamingGateway(CollaborationGateway):
 
     def stream_json(self, agent_name, system_prompt, payload):
         self.calls.append((agent_name, payload))
-        yield '{"intent":"推进冲突","draft":"初'
-        yield '稿","next_plan":"继续调查","new_facts":["发现线索"]}'
+        result = super().generate(agent_name, system_prompt, payload)
+        encoded = __import__("json").dumps(result, ensure_ascii=False)
+        midpoint = len(encoded) // 2
+        yield encoded[:midpoint]
+        yield encoded[midpoint:]
 
 
 class StreamingWorkflowTest(unittest.TestCase):
@@ -35,11 +38,23 @@ class StreamingWorkflowTest(unittest.TestCase):
         streamed_text = [event.manuscript for event in events if event.phase == "revision_delta"]
 
         self.assertEqual(phases[0], "draft_start")
-        self.assertEqual(draft_text, ["初", "初稿"])
+        self.assertTrue(draft_text)
+        self.assertEqual(draft_text[-1], "第一版场景")
         self.assertIn("critic_start", phases)
         self.assertIn("writer_response_start", phases)
         self.assertEqual(streamed_text, ["最终", "最终正文"])
         self.assertEqual(workflow.state.manuscript, "最终正文")
+
+    def test_outline_and_supporting_outputs_stream(self):
+        workflow = NovelWorkflow(StreamingGateway())
+        outline_events = list(workflow.stream_outline("测试创意"))
+        self.assertIn("outline_delta", [event.phase for event in outline_events])
+
+        round_events = list(workflow.stream_opening())
+        phases = [event.phase for event in round_events]
+        self.assertIn("critic_delta", phases)
+        self.assertIn("writer_response_delta", phases)
+        self.assertIn("memory_delta", phases)
 
     def test_deepseek_requests_disable_default_thinking_delay(self):
         source = inspect.getsource(DeepSeekGateway)
